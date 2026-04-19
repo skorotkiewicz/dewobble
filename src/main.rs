@@ -35,6 +35,8 @@ const EV_REL: u16 = 2;
 const EV_SYN: u16 = 0;
 const REL_X: u16 = 0;
 const REL_Y: u16 = 1;
+const REL_WHEEL: u16 = 8; // Vertical scroll
+const REL_HWHEEL: u16 = 6; // Horizontal scroll
 const BTN_LEFT: u16 = 272;
 const BTN_RIGHT: u16 = 273;
 const BTN_MIDDLE: u16 = 274;
@@ -65,6 +67,8 @@ struct InputId {
 const DEFAULT_DEBOUNCE_MS: u64 = 100;
 // Movement threshold - absorb movements smaller than this (in pixels)
 const DEFAULT_MOVEMENT_THRESHOLD: f64 = 3.0;
+// Scroll wheel debounce window (usually shorter than click debounce)
+const DEFAULT_SCROLL_DEBOUNCE_MS: u64 = 50;
 
 // Button state tracking for hold-mode debounce
 #[derive(Clone)]
@@ -86,7 +90,21 @@ impl ButtonState {
     }
 }
 
-// Create virtual input device via uinput
+// Scroll state tracking for scroll wheel debounce
+#[derive(Clone)]
+struct ScrollState {
+    last_scroll_time: Arc<AtomicU64>,
+    last_direction: Arc<AtomicI64>, // 1 = up/left, -1 = down/right, 0 = none
+}
+
+impl ScrollState {
+    fn new() -> Self {
+        Self {
+            last_scroll_time: Arc::new(AtomicU64::new(0)),
+            last_direction: Arc::new(AtomicI64::new(0)),
+        }
+    }
+}
 fn create_virtual_device() -> Option<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -110,6 +128,8 @@ fn create_virtual_device() -> Option<File> {
         // Enable relative axes
         libc::ioctl(fd, UI_SET_RELBIT, REL_X as i32);
         libc::ioctl(fd, UI_SET_RELBIT, REL_Y as i32);
+        libc::ioctl(fd, UI_SET_RELBIT, REL_WHEEL as i32);
+        libc::ioctl(fd, UI_SET_RELBIT, REL_HWHEEL as i32);
 
         // Setup device
         let mut setup: UinputSetup = std::mem::zeroed();
@@ -171,6 +191,13 @@ fn get_movement_threshold() -> f64 {
         .unwrap_or(DEFAULT_MOVEMENT_THRESHOLD)
 }
 
+fn get_scroll_debounce_ms() -> u64 {
+    env::var("SCROLL_DEBOUNCE_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_SCROLL_DEBOUNCE_MS)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let verbose = args.iter().any(|arg| arg == "--verbose" || arg == "-v");
@@ -179,10 +206,15 @@ fn main() {
     let debounce_ms = get_debounce_ms();
     let movement_threshold = get_movement_threshold();
     let movement_threshold_sq = movement_threshold * movement_threshold;
+    let scroll_debounce_ms = get_scroll_debounce_ms();
 
     println!("dewobble (epoll + uinput) started!");
     println!("Filtering clicks faster than {}ms", debounce_ms);
     println!("Filtering movements smaller than {}px", movement_threshold);
+    println!(
+        "Filtering scroll bounces faster than {}ms",
+        scroll_debounce_ms
+    );
 
     // Create virtual output device
     let virtual_dev = create_virtual_device();
@@ -248,6 +280,10 @@ fn main() {
     let left_btn = ButtonState::new();
     let right_btn = ButtonState::new();
     let middle_btn = ButtonState::new();
+
+    // Scroll state for debouncing
+    let scroll_v_state = ScrollState::new(); // Vertical scroll
+    let scroll_h_state = ScrollState::new(); // Horizontal scroll
 
     // Movement accumulation
     let accum_x = AtomicI64::new(0);
@@ -488,6 +524,108 @@ fn main() {
 
                             accum_x.store(0, Ordering::Relaxed);
                             accum_y.store(0, Ordering::Relaxed);
+                        }
+                    } else if rel_code == REL_WHEEL || rel_code == REL_HWHEEL {
+                        // Scroll wheel handling with debounce
+                        let now = current_time_ms();
+                        let is_vertical = rel_code == REL_WHEEL;
+                        let scroll_value = rel_value as i64;
+
+                        let current_dir = if scroll_value > 0 {
+                            1
+                        } else if scroll_value < 0 {
+                            -1
+                        } else {
+                            0
+                        };
+
+                        if current_dir == 0 {
+                            // No actual scroll - pass through silently
+                            if let Some(dev) = vdev {
+                                emit_event(dev, EV_REL, rel_code, rel_value);
+                            }
+                        } else {
+                            let scroll_state = if is_vertical {
+                                &scroll_v_state
+                            } else {
+                                &scroll_h_state
+                            };
+                            let last = scroll_state.last_scroll_time.load(Ordering::Relaxed);
+                            let time_since_last = now.saturating_sub(last);
+                            let last_dir = scroll_state.last_direction.load(Ordering::Relaxed);
+
+                            if last != 0 && time_since_last < scroll_debounce_ms {
+                                // Within debounce window - check for direction change (bounce)
+                                if last_dir != 0 && current_dir != last_dir {
+                                    // Direction changed within debounce window - likely a bounce
+                                    let scroll_name = if is_vertical {
+                                        if current_dir > 0 { "UP" } else { "DOWN" }
+                                    } else if current_dir > 0 {
+                                        "RIGHT"
+                                    } else {
+                                        "LEFT"
+                                    };
+                                    let last_name = if is_vertical {
+                                        if last_dir > 0 { "UP" } else { "DOWN" }
+                                    } else if last_dir > 0 {
+                                        "RIGHT"
+                                    } else {
+                                        "LEFT"
+                                    };
+
+                                    println!(
+                                        "[SCROLL-BLOCK] Bounce scroll: {} ({}ms after {}, opposite direction)",
+                                        scroll_name, time_since_last, last_name
+                                    );
+                                    // Don't emit - it's a bounce
+                                } else {
+                                    // Same direction within debounce - this is a rapid scroll, let it through
+                                    if let Some(dev) = vdev {
+                                        emit_event(dev, EV_REL, rel_code, rel_value);
+                                    }
+
+                                    scroll_state.last_scroll_time.store(now, Ordering::Relaxed);
+                                    // Keep last_direction the same
+
+                                    if verbose {
+                                        let scroll_name = if is_vertical {
+                                            if current_dir > 0 { "UP" } else { "DOWN" }
+                                        } else if current_dir > 0 {
+                                            "RIGHT"
+                                        } else {
+                                            "LEFT"
+                                        };
+                                        println!(
+                                            "[SCROLL-OK] Rapid scroll: {} ({}ms after last)",
+                                            scroll_name, time_since_last
+                                        );
+                                    }
+                                }
+                            } else {
+                                // Valid scroll - update state and emit
+                                scroll_state.last_scroll_time.store(now, Ordering::Relaxed);
+                                scroll_state
+                                    .last_direction
+                                    .store(current_dir, Ordering::Relaxed);
+
+                                if let Some(dev) = vdev {
+                                    emit_event(dev, EV_REL, rel_code, rel_value);
+                                }
+
+                                if verbose {
+                                    let scroll_name = if is_vertical {
+                                        if current_dir > 0 { "UP" } else { "DOWN" }
+                                    } else if current_dir > 0 {
+                                        "RIGHT"
+                                    } else {
+                                        "LEFT"
+                                    };
+                                    println!(
+                                        "[SCROLL-OK] Valid scroll: {} (delta: {})",
+                                        scroll_name, scroll_value
+                                    );
+                                }
+                            }
                         }
                     } else {
                         // Other relative events - pass through
