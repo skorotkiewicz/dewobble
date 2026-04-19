@@ -1,7 +1,8 @@
 use std::env;
 use std::fs::{OpenOptions, read_dir};
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::os::fd::RawFd;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // evdev event structure (from linux/input.h)
@@ -24,22 +25,46 @@ const BTN_RIGHT: u16 = 273;
 const BTN_MIDDLE: u16 = 274;
 
 // Debounce window in milliseconds
-const DEBOUNCE_MS: u64 = 100;
+const DEBOUNCE_MS: u64 = 200;
 // Movement threshold - absorb movements smaller than this (in pixels)
 const MOVEMENT_THRESHOLD: f64 = 3.0;
 // Threshold squared (avoid sqrt calculation)
 const MOVEMENT_THRESHOLD_SQ: f64 = MOVEMENT_THRESHOLD * MOVEMENT_THRESHOLD;
 
+// Button state tracking for hold-mode debounce
+struct ButtonState {
+    last_press_time: AtomicU64,
+    is_pressed: AtomicBool,
+    is_debouncing: AtomicBool,
+}
+
+impl ButtonState {
+    fn new() -> Self {
+        Self {
+            last_press_time: AtomicU64::new(0),
+            is_pressed: AtomicBool::new(false),
+            is_debouncing: AtomicBool::new(false),
+        }
+    }
+}
+
 fn main() {
-    let verbose = env::args().any(|arg| arg == "--verbose" || arg == "-v");
+    let args: Vec<String> = env::args().collect();
+    let verbose = args.iter().any(|arg| arg == "--verbose" || arg == "-v");
+    let hold_mode = args.iter().any(|arg| arg == "--hold" || arg == "-h");
 
     println!("dewobble (epoll) started!");
     println!("Filtering clicks faster than {}ms", DEBOUNCE_MS);
     println!("Filtering movements smaller than {}px", MOVEMENT_THRESHOLD);
+    if hold_mode {
+        println!("Mode: HOLD (bypass rapid clicks as held state)");
+    } else {
+        println!("Mode: BLOCK (suppress rapid clicks entirely)");
+    }
     println!("Press Ctrl+C to exit\n");
 
     // Open all mouse devices
-    let mut device_fds: Vec<(std::path::PathBuf, std::os::fd::RawFd)> = Vec::new();
+    let mut device_fds: Vec<(std::path::PathBuf, RawFd)> = Vec::new();
     for entry in read_dir("/dev/input").expect("Cannot read /dev/input") {
         let entry = entry.expect("Failed to read directory entry");
         let path = entry.path();
@@ -48,7 +73,6 @@ fn main() {
             && let Ok(file) = OpenOptions::new().read(true).open(&path)
         {
             device_fds.push((path.clone(), file.as_raw_fd()));
-            // Keep file open by leaking it (simpler than managing ownership)
             std::mem::forget(file);
         }
     }
@@ -78,9 +102,10 @@ fn main() {
     }
 
     // State - using atomics for lock-free access
-    let last_click_left = AtomicU64::new(0);
-    let last_click_right = AtomicU64::new(0);
-    let last_click_middle = AtomicU64::new(0);
+    let left_btn = ButtonState::new();
+    let right_btn = ButtonState::new();
+    let middle_btn = ButtonState::new();
+
     // Accumulated relative movement (for jitter filtering)
     let accum_x = AtomicI64::new(0);
     let accum_y = AtomicI64::new(0);
@@ -90,13 +115,12 @@ fn main() {
     loop {
         let nfds = unsafe { libc::epoll_wait(epoll_fd, events.as_mut_ptr(), 10, -1) };
         if nfds < 0 {
-            break; // Interrupted
+            break;
         }
 
         for event in events.iter().take(nfds as usize) {
             let fd = event.u64 as i32;
 
-            // Read the event directly from the fd
             let mut input_event: InputEvent = unsafe { std::mem::zeroed() };
             let buffer = unsafe {
                 std::slice::from_raw_parts_mut(
@@ -111,31 +135,98 @@ fn main() {
             }
 
             match input_event.event_type {
-                EV_KEY if input_event.value == 1 => {
-                    // Button press
-                    let now = current_time_ms();
+                EV_KEY => {
                     let code = input_event.code;
+                    let value = input_event.value;
+                    let now = current_time_ms();
 
-                    let (last_time_ref, name) = match code {
-                        BTN_LEFT => (&last_click_left, "Left"),
-                        BTN_RIGHT => (&last_click_right, "Right"),
-                        BTN_MIDDLE => (&last_click_middle, "Middle"),
+                    let (state, name) = match code {
+                        BTN_LEFT => (&left_btn, "Left"),
+                        BTN_RIGHT => (&right_btn, "Right"),
+                        BTN_MIDDLE => (&middle_btn, "Middle"),
                         _ => continue,
                     };
 
-                    let last = last_time_ref.load(Ordering::Relaxed);
-                    if last != 0 && now - last < DEBOUNCE_MS {
-                        println!("[BLOCKED] Bounce click: {} ({}ms)", name, now - last);
-                    } else {
-                        if verbose {
-                            println!("[OK] Valid click: {}", name);
+                    if value == 1 {
+                        // Button press
+                        let last = state.last_press_time.load(Ordering::Relaxed);
+                        let time_since_last = now.saturating_sub(last);
+
+                        if last != 0 && time_since_last < DEBOUNCE_MS {
+                            // Rapid click detected - treat as bounce
+                            if hold_mode {
+                                // In hold mode: mark as debouncing, keep pressed state
+                                state.is_debouncing.store(true, Ordering::Relaxed);
+                                state.is_pressed.store(true, Ordering::Relaxed);
+                                if verbose {
+                                    println!(
+                                        "[HOLD] Rapid click absorbed: {} ({}ms) - treating as held",
+                                        name, time_since_last
+                                    );
+                                }
+                            } else {
+                                // In block mode: suppress entirely
+                                if verbose {
+                                    println!(
+                                        "[BLOCKED] Bounce click: {} ({}ms)",
+                                        name, time_since_last
+                                    );
+                                }
+                            }
+                        } else {
+                            // Valid press
+                            state.is_pressed.store(true, Ordering::Relaxed);
+                            state.is_debouncing.store(false, Ordering::Relaxed);
+                            state.last_press_time.store(now, Ordering::Relaxed);
+                            if verbose {
+                                println!("[OK] Press: {}", name);
+                            }
                         }
-                        last_time_ref.store(now, Ordering::Relaxed);
+                    } else if value == 0 {
+                        // Button release
+                        if hold_mode {
+                            let last = state.last_press_time.load(Ordering::Relaxed);
+                            let time_held = now.saturating_sub(last);
+
+                            if state.is_debouncing.load(Ordering::Relaxed) {
+                                // Was in debounce state - check if we've waited long enough
+                                if time_held < DEBOUNCE_MS {
+                                    // Too soon - extend the hold
+                                    state.is_pressed.store(true, Ordering::Relaxed);
+                                    if verbose {
+                                        println!(
+                                            "[HOLD] Extending hold for {} ({}ms held)",
+                                            name, time_held
+                                        );
+                                    }
+                                    // Note: In a real implementation, you'd synthesize a delayed release
+                                    // Here we just log it
+                                } else {
+                                    // Debounce period passed - allow release
+                                    state.is_pressed.store(false, Ordering::Relaxed);
+                                    state.is_debouncing.store(false, Ordering::Relaxed);
+                                    if verbose {
+                                        println!("[OK] Release (after hold): {}", name);
+                                    }
+                                }
+                            } else {
+                                // Normal release
+                                state.is_pressed.store(false, Ordering::Relaxed);
+                                if verbose {
+                                    println!("[OK] Release: {}", name);
+                                }
+                            }
+                        } else {
+                            // Block mode - just track state
+                            state.is_pressed.store(false, Ordering::Relaxed);
+                            if verbose {
+                                println!("[OK] Release: {}", name);
+                            }
+                        }
                     }
                 }
 
                 EV_REL if verbose => {
-                    // Relative movement - accumulate for jitter filtering
                     let dx = if input_event.code == REL_X {
                         input_event.value
                     } else if input_event.code == REL_Y {
@@ -150,16 +241,13 @@ fn main() {
                         0
                     };
 
-                    // Accumulate
                     let new_x = accum_x.load(Ordering::Relaxed) + dx as i64;
                     let new_y = accum_y.load(Ordering::Relaxed) + dy as i64;
                     accum_x.store(new_x, Ordering::Relaxed);
                     accum_y.store(new_y, Ordering::Relaxed);
 
-                    // Check if accumulated movement exceeds threshold
                     let dist_sq = (new_x * new_x) as f64 + (new_y * new_y) as f64;
                     if dist_sq >= MOVEMENT_THRESHOLD_SQ {
-                        // Significant movement - report and reset accumulator
                         let dist = dist_sq.sqrt();
                         println!(
                             "[OK] Mouse moved: accum=({}, {}), dist={:.1}px",
