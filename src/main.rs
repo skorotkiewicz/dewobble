@@ -4,8 +4,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // Minimum time between clicks to be considered separate (not bounce)
-// Physically faulty switches usually bounce within 20-80ms
 const DEBOUNCE_MS: u64 = 100;
+
+// Minimum mouse movement in pixels to not be considered "jitter"
+// Movements smaller than this will be absorbed
+const MOVEMENT_THRESHOLD: f64 = 3.0;
 
 // Convert button to a simple ID for tracking
 fn button_id(button: &Button) -> &'static str {
@@ -23,38 +26,78 @@ fn button_id(button: &Button) -> &'static str {
 
 fn main() {
     println!("Mouse Debouncer started!");
-    println!("Filtering out clicks faster than {}ms", DEBOUNCE_MS);
+    println!("Filtering clicks faster than {}ms", DEBOUNCE_MS);
+    println!(
+        "Filtering movements smaller than {} pixels",
+        MOVEMENT_THRESHOLD
+    );
     println!("Press Ctrl+C to exit\n");
 
     // Track last click time for each button
     let last_clicks: Arc<Mutex<HashMap<&'static str, Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    // Track mouse position for jitter filtering
+    // We store the "reference" position - the last position we considered "significant"
+    let last_position: Arc<Mutex<Option<(f64, f64)>>> = Arc::new(Mutex::new(None));
+
     let callback = move |event: Event| {
-        // Only process button press events
-        if let EventType::ButtonPress(button) = event.event_type {
-            let btn_id = button_id(&button);
-            let now = Instant::now();
+        match event.event_type {
+            EventType::ButtonPress(button) => {
+                let btn_id = button_id(&button);
+                let now = Instant::now();
 
-            let mut clicks = last_clicks.lock().unwrap();
+                let mut clicks = last_clicks.lock().unwrap();
 
-            if let Some(last_time) = clicks.get(btn_id) {
-                let elapsed = now.duration_since(*last_time);
+                if let Some(last_time) = clicks.get(btn_id) {
+                    let elapsed = now.duration_since(*last_time);
 
-                if elapsed < Duration::from_millis(DEBOUNCE_MS) {
-                    // This is a bounce - ignore it
+                    if elapsed < Duration::from_millis(DEBOUNCE_MS) {
+                        // This is a bounce - ignore it
+                        println!(
+                            "[BLOCKED] Bounce click: {:?} ({}ms after last)",
+                            button,
+                            elapsed.as_millis()
+                        );
+                        return;
+                    }
+                }
+
+                // Valid click - update the timestamp
+                println!("[OK] Valid click: {:?}", button);
+                clicks.insert(btn_id, now);
+            }
+
+            EventType::MouseMove { x, y } => {
+                let mut pos = last_position.lock().unwrap();
+
+                if let Some((last_x, last_y)) = *pos {
+                    // Calculate distance moved
+                    let dx = x - last_x;
+                    let dy = y - last_y;
+                    let distance = (dx * dx + dy * dy).sqrt();
+
+                    if distance < MOVEMENT_THRESHOLD {
+                        // Jitter - ignore this small movement
+                        // Don't update the reference position, so we keep measuring
+                        // from the last significant position
+                        return;
+                    }
+
+                    // Significant movement - update reference and report
                     println!(
-                        "Blocked bounce: {:?} ({}ms after last click)",
-                        button,
-                        elapsed.as_millis()
+                        "[OK] Mouse moved: ({:.0}, {:.0}) - distance: {:.1}px",
+                        x, y, distance
                     );
-                    return;
+                    *pos = Some((x, y));
+                } else {
+                    // First movement ever - just store it
+                    println!("[OK] Initial position: ({:.0}, {:.0})", x, y);
+                    *pos = Some((x, y));
                 }
             }
 
-            // Valid click - update the timestamp
-            println!("Valid click: {:?}", button);
-            clicks.insert(btn_id, now);
+            _ => {} // Ignore other events
         }
     };
 
