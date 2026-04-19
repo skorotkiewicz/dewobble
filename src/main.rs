@@ -62,10 +62,9 @@ struct InputId {
 }
 
 // Debounce window in milliseconds
-const DEBOUNCE_MS: u64 = 200;
+const DEFAULT_DEBOUNCE_MS: u64 = 100;
 // Movement threshold - absorb movements smaller than this (in pixels)
-const MOVEMENT_THRESHOLD: f64 = 3.0;
-const MOVEMENT_THRESHOLD_SQ: f64 = MOVEMENT_THRESHOLD * MOVEMENT_THRESHOLD;
+const DEFAULT_MOVEMENT_THRESHOLD: f64 = 3.0;
 
 // Button state tracking for hold-mode debounce
 #[derive(Clone)]
@@ -158,14 +157,32 @@ fn current_time_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn get_debounce_ms() -> u64 {
+    env::var("DEBOUNCE_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_DEBOUNCE_MS)
+}
+
+fn get_movement_threshold() -> f64 {
+    env::var("MOVEMENT_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_MOVEMENT_THRESHOLD)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let verbose = args.iter().any(|arg| arg == "--verbose" || arg == "-v");
     let hold_mode = args.iter().any(|arg| arg == "--hold" || arg == "-h");
 
+    let debounce_ms = get_debounce_ms();
+    let movement_threshold = get_movement_threshold();
+    let movement_threshold_sq = movement_threshold * movement_threshold;
+
     println!("dewobble (epoll + uinput) started!");
-    println!("Filtering clicks faster than {}ms", DEBOUNCE_MS);
-    println!("Filtering movements smaller than {}px", MOVEMENT_THRESHOLD);
+    println!("Filtering clicks faster than {}ms", debounce_ms);
+    println!("Filtering movements smaller than {}px", movement_threshold);
 
     // Create virtual output device
     let virtual_dev = create_virtual_device();
@@ -245,6 +262,7 @@ fn main() {
         let right_clone = right_btn.clone();
         let middle_clone = middle_btn.clone();
         let verbose_clone = verbose;
+        let debounce_ms_clone = debounce_ms;
 
         thread::spawn(move || {
             loop {
@@ -258,7 +276,7 @@ fn main() {
                 ] {
                     if state.pending_release.load(Ordering::Relaxed) {
                         let last = state.last_press_time.load(Ordering::Relaxed);
-                        if now - last >= DEBOUNCE_MS {
+                        if now - last >= debounce_ms_clone {
                             // Time to release
                             state.is_pressed.store(false, Ordering::Relaxed);
                             state.is_debouncing.store(false, Ordering::Relaxed);
@@ -325,7 +343,7 @@ fn main() {
                         let last = state.last_press_time.load(Ordering::Relaxed);
                         let time_since_last = now.saturating_sub(last);
 
-                        if last != 0 && time_since_last < DEBOUNCE_MS {
+                        if last != 0 && time_since_last < debounce_ms {
                             // Rapid click
                             if hold_mode {
                                 state.is_debouncing.store(true, Ordering::Relaxed);
@@ -377,7 +395,7 @@ fn main() {
                             let time_held = now.saturating_sub(last);
 
                             if state.is_debouncing.load(Ordering::Relaxed) {
-                                if time_held < DEBOUNCE_MS {
+                                if time_held < debounce_ms {
                                     // Too soon - mark for delayed release
                                     state.pending_release.store(true, Ordering::Relaxed);
                                     if verbose {
@@ -451,7 +469,7 @@ fn main() {
                         let ay = accum_y.load(Ordering::Relaxed);
                         let dist_sq = (ax * ax) as f64 + (ay * ay) as f64;
 
-                        if dist_sq >= MOVEMENT_THRESHOLD_SQ {
+                        if dist_sq >= movement_threshold_sq {
                             // Significant movement - emit to virtual device
                             if let Some(dev) = vdev {
                                 if ax != 0 {
