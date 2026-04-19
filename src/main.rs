@@ -233,9 +233,6 @@ fn main() {
     } else {
         println!("Mode: BLOCK (rapid clicks are suppressed)");
     }
-    if verbose {
-        println!("Verbose mode: ON");
-    }
     println!("Press Ctrl+C to exit\n");
 
     // Open all mouse devices
@@ -573,10 +570,12 @@ fn main() {
                                         "LEFT"
                                     };
 
-                                    println!(
-                                        "[SCROLL-BLOCK] Bounce scroll: {} ({}ms after {}, opposite direction)",
-                                        scroll_name, time_since_last, last_name
-                                    );
+                                    if verbose {
+                                        println!(
+                                            "[SCROLL-BLOCK] Bounce scroll: {} ({}ms after {}, opposite direction)",
+                                            scroll_name, time_since_last, last_name
+                                        );
+                                    }
                                     // Don't emit - it's a bounce
                                 } else {
                                     // Same direction within debounce - this is a rapid scroll, let it through
