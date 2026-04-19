@@ -263,16 +263,18 @@ fn main() {
                         // Within debounce window - check for direction change (bounce)
                         if scroll.last_direction != 0 && current_dir != scroll.last_direction {
                             // Direction changed within debounce window - likely a bounce
-                            println!(
-                                "[SCROLL-BLOCK] Bounce scroll: {} ({}ms after {}, opposite direction)",
-                                if current_dir > 0 { "UP" } else { "DOWN" },
-                                elapsed.as_millis(),
-                                if scroll.last_direction > 0 {
-                                    "UP"
-                                } else {
-                                    "DOWN"
-                                }
-                            );
+                            if verbose {
+                                println!(
+                                    "[SCROLL-BLOCK] Bounce scroll: {} ({}ms after {}, opposite direction)",
+                                    if current_dir > 0 { "UP" } else { "DOWN" },
+                                    elapsed.as_millis(),
+                                    if scroll.last_direction > 0 {
+                                        "UP"
+                                    } else {
+                                        "DOWN"
+                                    }
+                                );
+                            }
                             return;
                         }
                     }
