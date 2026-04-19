@@ -5,11 +5,27 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // Minimum time between clicks to be considered separate (not bounce)
-const DEBOUNCE_MS: u64 = 100;
+const DEBOUNCE_MS: u64 = 150;
 
 // Minimum mouse movement in pixels to not be considered "jitter"
-// Movements smaller than this will be absorbed
 const MOVEMENT_THRESHOLD: f64 = 3.0;
+
+// Button state tracking for hold-mode debounce
+struct ButtonState {
+    last_press_time: Option<Instant>,
+    is_pressed: bool,
+    is_debouncing: bool,
+}
+
+impl ButtonState {
+    fn new() -> Self {
+        Self {
+            last_press_time: None,
+            is_pressed: false,
+            is_debouncing: false,
+        }
+    }
+}
 
 // Convert button to a simple ID for tracking
 fn button_id(button: &Button) -> &'static str {
@@ -26,22 +42,28 @@ fn button_id(button: &Button) -> &'static str {
 }
 
 fn main() {
-    let verbose = env::args().any(|arg| arg == "--verbose" || arg == "-v");
+    let args: Vec<String> = env::args().collect();
+    let verbose = args.iter().any(|arg| arg == "--verbose" || arg == "-v");
+    let hold_mode = args.iter().any(|arg| arg == "--hold" || arg == "-h");
 
-    println!("dewobble started!");
+    println!("dewobble (rdev) started!");
     println!("Filtering clicks faster than {}ms", DEBOUNCE_MS);
     println!(
         "Filtering movements smaller than {} pixels",
         MOVEMENT_THRESHOLD
     );
+    if hold_mode {
+        println!("Mode: HOLD (absorb rapid clicks as held state)");
+    } else {
+        println!("Mode: BLOCK (suppress rapid clicks)");
+    }
     println!("Press Ctrl+C to exit\n");
 
-    // Track last click time for each button
-    let last_clicks: Arc<Mutex<HashMap<&'static str, Instant>>> =
+    // Track button states
+    let button_states: Arc<Mutex<HashMap<&'static str, ButtonState>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     // Track mouse position for jitter filtering
-    // We store the "reference" position - the last position we considered "significant"
     let last_position: Arc<Mutex<Option<(f64, f64)>>> = Arc::new(Mutex::new(None));
 
     let callback = move |event: Event| {
@@ -50,65 +72,125 @@ fn main() {
                 let btn_id = button_id(&button);
                 let now = Instant::now();
 
-                let mut clicks = last_clicks.lock().unwrap();
+                let mut states = button_states.lock().unwrap();
+                let state = states.entry(btn_id).or_insert_with(ButtonState::new);
 
-                if let Some(last_time) = clicks.get(btn_id) {
-                    let elapsed = now.duration_since(*last_time);
+                if let Some(last_time) = state.last_press_time {
+                    let elapsed = now.duration_since(last_time);
 
                     if elapsed < Duration::from_millis(DEBOUNCE_MS) {
-                        // This is a bounce - always show, even in silent mode
-                        println!(
-                            "[BLOCKED] Bounce click: {:?} ({}ms after last)",
-                            button,
-                            elapsed.as_millis()
-                        );
+                        // Rapid click detected
+                        if hold_mode {
+                            state.is_debouncing = true;
+                            state.is_pressed = true;
+                            println!(
+                                "[HOLD] Rapid click absorbed: {:?} ({}ms) - treating as held",
+                                button,
+                                elapsed.as_millis()
+                            );
+                        } else {
+                            println!(
+                                "[BLOCKED] Bounce click: {:?} ({}ms after last)",
+                                button,
+                                elapsed.as_millis()
+                            );
+                        }
                         return;
                     }
                 }
 
-                // Valid click - update the timestamp
+                // Valid click
+                state.is_pressed = true;
+                state.is_debouncing = false;
+                state.last_press_time = Some(now);
                 if verbose {
                     println!("[OK] Valid click: {:?}", button);
                 }
-                clicks.insert(btn_id, now);
+            }
+
+            EventType::ButtonRelease(button) => {
+                if !hold_mode {
+                    // In block mode, just update state silently
+                    let btn_id = button_id(&button);
+                    let mut states = button_states.lock().unwrap();
+                    if let Some(state) = states.get_mut(btn_id) {
+                        state.is_pressed = false;
+                        if verbose {
+                            println!("[OK] Release: {:?}", button);
+                        }
+                    }
+                    return;
+                }
+
+                // Hold mode release handling
+                let btn_id = button_id(&button);
+                let now = Instant::now();
+                let mut states = button_states.lock().unwrap();
+
+                if let Some(state) = states.get_mut(btn_id)
+                    && let Some(last_time) = state.last_press_time
+                {
+                    let held_duration = now.duration_since(last_time);
+
+                    if state.is_debouncing {
+                        // Was in debounce state
+                        if held_duration < Duration::from_millis(DEBOUNCE_MS) {
+                            // Too soon - extend hold (log only, actual hold requires event injection)
+                            state.is_pressed = true;
+                            println!(
+                                "[HOLD] Extending hold for {:?} ({}ms held)",
+                                button,
+                                held_duration.as_millis()
+                            );
+                        } else {
+                            // Debounce period passed
+                            state.is_pressed = false;
+                            state.is_debouncing = false;
+                            if verbose {
+                                println!("[OK] Release (after hold): {:?}", button);
+                            }
+                        }
+                    } else {
+                        // Normal release
+                        state.is_pressed = false;
+                        if verbose {
+                            println!("[OK] Release: {:?}", button);
+                        }
+                    }
+                }
             }
 
             EventType::MouseMove { x, y } => {
                 if !verbose {
-                    return; // Skip all movement logging in silent mode
+                    return;
                 }
 
                 let mut pos = last_position.lock().unwrap();
 
                 if let Some((last_x, last_y)) = *pos {
-                    // Calculate distance moved
                     let dx = x - last_x;
                     let dy = y - last_y;
                     let distance = (dx * dx + dy * dy).sqrt();
 
                     if distance < MOVEMENT_THRESHOLD {
-                        // Jitter - ignore this small movement
                         return;
                     }
 
-                    // Significant movement - update reference and report
                     println!(
                         "[OK] Mouse moved: ({:.0}, {:.0}) - distance: {:.1}px",
                         x, y, distance
                     );
                     *pos = Some((x, y));
                 } else {
-                    // First movement ever - just store it
                     println!("[OK] Initial position: ({:.0}, {:.0})", x, y);
                     *pos = Some((x, y));
                 }
             }
 
-            _ => {} // Ignore other events
+            _ => {}
         }
     };
 
-    // Start listening
     if let Err(e) = listen(callback) {
         eprintln!("Error: {:?}", e);
     }
