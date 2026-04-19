@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // Minimum time between clicks to be considered separate (not bounce)
-const DEBOUNCE_MS: u64 = 150;
+const DEBOUNCE_MS: u64 = 200;
 
 // Minimum mouse movement in pixels to not be considered "jitter"
 const MOVEMENT_THRESHOLD: f64 = 3.0;
