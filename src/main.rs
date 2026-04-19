@@ -4,6 +4,9 @@ use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+// Scroll wheel debounce window (usually shorter than click debounce)
+const DEFAULT_SCROLL_DEBOUNCE_MS: u64 = 50;
+
 // Minimum time between clicks to be considered separate (not bounce)
 const DEFAULT_DEBOUNCE_MS: u64 = 100;
 
@@ -23,6 +26,21 @@ impl ButtonState {
             last_press_time: None,
             is_pressed: false,
             is_debouncing: false,
+        }
+    }
+}
+
+// Scroll state tracking for scroll wheel debounce
+struct ScrollState {
+    last_scroll_time: Option<Instant>,
+    last_direction: i8, // 1 = up, -1 = down, 0 = none
+}
+
+impl ScrollState {
+    fn new() -> Self {
+        Self {
+            last_scroll_time: None,
+            last_direction: 0,
         }
     }
 }
@@ -55,6 +73,13 @@ fn get_movement_threshold() -> f64 {
         .unwrap_or(DEFAULT_MOVEMENT_THRESHOLD)
 }
 
+fn get_scroll_debounce_ms() -> u64 {
+    env::var("SCROLL_DEBOUNCE_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_SCROLL_DEBOUNCE_MS)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let verbose = args.iter().any(|arg| arg == "--verbose" || arg == "-v");
@@ -62,12 +87,17 @@ fn main() {
 
     let debounce_ms = get_debounce_ms();
     let movement_threshold = get_movement_threshold();
+    let scroll_debounce_ms = get_scroll_debounce_ms();
 
     println!("dewobble (rdev) started!");
     println!("Filtering clicks faster than {}ms", debounce_ms);
     println!(
         "Filtering movements smaller than {} pixels",
         movement_threshold
+    );
+    println!(
+        "Filtering scroll bounces faster than {}ms",
+        scroll_debounce_ms
     );
     if hold_mode {
         println!("Mode: HOLD (absorb rapid clicks as held state)");
@@ -82,6 +112,9 @@ fn main() {
 
     // Track mouse position for jitter filtering
     let last_position: Arc<Mutex<Option<(f64, f64)>>> = Arc::new(Mutex::new(None));
+
+    // Track scroll state for scroll wheel debouncing
+    let scroll_state: Arc<Mutex<ScrollState>> = Arc::new(Mutex::new(ScrollState::new()));
 
     let callback = move |event: Event| {
         match event.event_type {
@@ -201,6 +234,60 @@ fn main() {
                 } else {
                     println!("[OK] Initial position: ({:.0}, {:.0})", x, y);
                     *pos = Some((x, y));
+                }
+            }
+
+            EventType::Wheel {
+                delta_x: _,
+                delta_y,
+            } => {
+                let now = Instant::now();
+                let current_dir = if delta_y > 0 {
+                    1
+                } else if delta_y < 0 {
+                    -1
+                } else {
+                    0
+                };
+
+                if current_dir == 0 {
+                    return; // No vertical scroll
+                }
+
+                let mut scroll = scroll_state.lock().unwrap();
+
+                if let Some(last_time) = scroll.last_scroll_time {
+                    let elapsed = now.duration_since(last_time);
+
+                    if elapsed < Duration::from_millis(scroll_debounce_ms) {
+                        // Within debounce window - check for direction change (bounce)
+                        if scroll.last_direction != 0 && current_dir != scroll.last_direction {
+                            // Direction changed within debounce window - likely a bounce
+                            println!(
+                                "[SCROLL-BLOCK] Bounce scroll: {} ({}ms after {}, opposite direction)",
+                                if current_dir > 0 { "UP" } else { "DOWN" },
+                                elapsed.as_millis(),
+                                if scroll.last_direction > 0 {
+                                    "UP"
+                                } else {
+                                    "DOWN"
+                                }
+                            );
+                            return;
+                        }
+                    }
+                }
+
+                // Valid scroll - update state
+                scroll.last_scroll_time = Some(now);
+                scroll.last_direction = current_dir;
+
+                if verbose {
+                    println!(
+                        "[SCROLL-OK] Valid scroll: {} (delta: {})",
+                        if current_dir > 0 { "UP" } else { "DOWN" },
+                        delta_y
+                    );
                 }
             }
 

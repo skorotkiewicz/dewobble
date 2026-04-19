@@ -5,6 +5,7 @@ Filter out phantom clicks and mouse jitter.
 ## What it does
 
 - **Debounces clicks**: Ignores button bounces within 100ms (fixing worn-out mouse switches)
+- **Debounces scroll**: Ignores scroll wheel bounces in opposite direction (fixing defective scroll wheels that scroll up when you scroll down)
 - **Smooths movement**: Absorbs tiny movements under 3px (helping shaky hands or high-DPI mice)
 
 ## Install
@@ -63,8 +64,11 @@ DEBOUNCE_MS=150 ./target/release/dewobble
 # Adjust movement threshold (default: 3.0 pixels)
 MOVEMENT_THRESHOLD=5.0 ./target/release/dewobble
 
+# Adjust scroll debounce (default: 50ms) - increase for bouncier scroll wheels
+SCROLL_DEBOUNCE_MS=100 ./target/release/dewobble
+
 # Combined example
-DEBOUNCE_MS=200 MOVEMENT_THRESHOLD=10.0 ./target/release/dewobble --hold
+DEBOUNCE_MS=200 MOVEMENT_THRESHOLD=10.0 SCROLL_DEBOUNCE_MS=100 ./target/release/dewobble --hold
 ```
 
 Or edit `src/main.rs` for permanent changes:
@@ -72,6 +76,7 @@ Or edit `src/main.rs` for permanent changes:
 ```rust
 const DEFAULT_DEBOUNCE_MS: u64 = 100;        // Increase for bouncier switches
 const DEFAULT_MOVEMENT_THRESHOLD: f64 = 3.0;  // Increase for shakier hands
+const DEFAULT_SCROLL_DEBOUNCE_MS: u64 = 50;   // Increase for bouncier scroll wheels
 ```
 
 Then `cargo build --release` again.
