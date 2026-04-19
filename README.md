@@ -54,11 +54,24 @@ sudo usermod -a -G input $USER
 
 ## Tuning
 
-Edit `src/main.rs`:
+Set via environment variables:
+
+```bash
+# Adjust debounce window (default: 100ms)
+DEBOUNCE_MS=150 ./target/release/dewobble
+
+# Adjust movement threshold (default: 3.0 pixels)
+MOVEMENT_THRESHOLD=5.0 ./target/release/dewobble
+
+# Combined example
+DEBOUNCE_MS=200 MOVEMENT_THRESHOLD=10.0 ./target/release/dewobble --hold
+```
+
+Or edit `src/main.rs` for permanent changes:
 
 ```rust
-const DEBOUNCE_MS: u64 = 100;        // Increase for bouncier switches
-const MOVEMENT_THRESHOLD: f64 = 3.0;  // Increase for shakier hands
+const DEFAULT_DEBOUNCE_MS: u64 = 100;        // Increase for bouncier switches
+const DEFAULT_MOVEMENT_THRESHOLD: f64 = 3.0;  // Increase for shakier hands
 ```
 
 Then `cargo build --release` again.

@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // Minimum time between clicks to be considered separate (not bounce)
-const DEBOUNCE_MS: u64 = 100;
+const DEFAULT_DEBOUNCE_MS: u64 = 100;
 
 // Minimum mouse movement in pixels to not be considered "jitter"
-const MOVEMENT_THRESHOLD: f64 = 3.0;
+const DEFAULT_MOVEMENT_THRESHOLD: f64 = 3.0;
 
 // Button state tracking for hold-mode debounce
 struct ButtonState {
@@ -41,16 +41,33 @@ fn button_id(button: &Button) -> &'static str {
     }
 }
 
+fn get_debounce_ms() -> u64 {
+    env::var("DEBOUNCE_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_DEBOUNCE_MS)
+}
+
+fn get_movement_threshold() -> f64 {
+    env::var("MOVEMENT_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_MOVEMENT_THRESHOLD)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let verbose = args.iter().any(|arg| arg == "--verbose" || arg == "-v");
     let hold_mode = args.iter().any(|arg| arg == "--hold" || arg == "-h");
 
+    let debounce_ms = get_debounce_ms();
+    let movement_threshold = get_movement_threshold();
+
     println!("dewobble (rdev) started!");
-    println!("Filtering clicks faster than {}ms", DEBOUNCE_MS);
+    println!("Filtering clicks faster than {}ms", debounce_ms);
     println!(
         "Filtering movements smaller than {} pixels",
-        MOVEMENT_THRESHOLD
+        movement_threshold
     );
     if hold_mode {
         println!("Mode: HOLD (absorb rapid clicks as held state)");
@@ -78,7 +95,7 @@ fn main() {
                 if let Some(last_time) = state.last_press_time {
                     let elapsed = now.duration_since(last_time);
 
-                    if elapsed < Duration::from_millis(DEBOUNCE_MS) {
+                    if elapsed < Duration::from_millis(debounce_ms) {
                         // Rapid click detected
                         if hold_mode {
                             state.is_debouncing = true;
@@ -134,7 +151,7 @@ fn main() {
 
                     if state.is_debouncing {
                         // Was in debounce state
-                        if held_duration < Duration::from_millis(DEBOUNCE_MS) {
+                        if held_duration < Duration::from_millis(debounce_ms) {
                             // Too soon - extend hold (log only, actual hold requires event injection)
                             state.is_pressed = true;
                             println!(
@@ -172,7 +189,7 @@ fn main() {
                     let dy = y - last_y;
                     let distance = (dx * dx + dy * dy).sqrt();
 
-                    if distance < MOVEMENT_THRESHOLD {
+                    if distance < movement_threshold {
                         return;
                     }
 
