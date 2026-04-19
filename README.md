@@ -17,11 +17,29 @@ cargo build --release
 
 ## Run
 
+**Normal mode** (quiet, only shows blocked bounces):
+```bash
+./target/release/dewobble
+```
+
+**Verbose mode** (shows all clicks and mouse movements):
+```bash
+./target/release/dewobble --verbose
+```
+
+**X11 or permission errors:**
 ```bash
 sudo ./target/release/dewobble
 ```
 
-> `sudo` required for raw input access on Linux.
+> Note: On Wayland, running with `sudo` often fails due to session permissions. Try without sudo first.
+
+## Troubleshooting
+
+**Permission denied:** Add your user to the `input` group and log out/back in:
+```bash
+sudo usermod -a -G input $USER
+```
 
 ## Tuning
 

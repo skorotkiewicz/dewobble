@@ -1,5 +1,6 @@
 use rdev::{Button, Event, EventType, listen};
 use std::collections::HashMap;
+use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,7 +26,9 @@ fn button_id(button: &Button) -> &'static str {
 }
 
 fn main() {
-    println!("Mouse Debouncer started!");
+    let verbose = env::args().any(|arg| arg == "--verbose" || arg == "-v");
+
+    println!("dewobble started!");
     println!("Filtering clicks faster than {}ms", DEBOUNCE_MS);
     println!(
         "Filtering movements smaller than {} pixels",
@@ -53,7 +56,7 @@ fn main() {
                     let elapsed = now.duration_since(*last_time);
 
                     if elapsed < Duration::from_millis(DEBOUNCE_MS) {
-                        // This is a bounce - ignore it
+                        // This is a bounce - always show, even in silent mode
                         println!(
                             "[BLOCKED] Bounce click: {:?} ({}ms after last)",
                             button,
@@ -64,11 +67,17 @@ fn main() {
                 }
 
                 // Valid click - update the timestamp
-                println!("[OK] Valid click: {:?}", button);
+                if verbose {
+                    println!("[OK] Valid click: {:?}", button);
+                }
                 clicks.insert(btn_id, now);
             }
 
             EventType::MouseMove { x, y } => {
+                if !verbose {
+                    return; // Skip all movement logging in silent mode
+                }
+
                 let mut pos = last_position.lock().unwrap();
 
                 if let Some((last_x, last_y)) = *pos {
@@ -79,8 +88,6 @@ fn main() {
 
                     if distance < MOVEMENT_THRESHOLD {
                         // Jitter - ignore this small movement
-                        // Don't update the reference position, so we keep measuring
-                        // from the last significant position
                         return;
                     }
 
