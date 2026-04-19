@@ -25,7 +25,7 @@ const BTN_RIGHT: u16 = 273;
 const BTN_MIDDLE: u16 = 274;
 
 // Debounce window in milliseconds
-const DEBOUNCE_MS: u64 = 200;
+const DEBOUNCE_MS: u64 = 150;
 // Movement threshold - absorb movements smaller than this (in pixels)
 const MOVEMENT_THRESHOLD: f64 = 3.0;
 // Threshold squared (avoid sqrt calculation)
