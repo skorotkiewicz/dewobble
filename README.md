@@ -22,6 +22,11 @@ cargo build --release
 ./target/release/dewobble
 ```
 
+**Hold mode** (absorb rapid clicks as held state instead of blocking):
+```bash
+./target/release/dewobble --hold
+```
+
 **Verbose mode** (shows all clicks and mouse movements):
 ```bash
 ./target/release/dewobble --verbose
@@ -33,6 +38,12 @@ sudo ./target/release/dewobble
 ```
 
 > Note: On Wayland, running with `sudo` often fails due to session permissions. Try without sudo first.
+
+## Modes Explained
+
+**BLOCK mode** (default): Rapid clicks within 100ms are suppressed entirely.
+
+**HOLD mode** (`--hold`): Rapid clicks are converted to a "held" state - the button stays pressed until the debounce period (100ms) passes. This feels more like a clean mechanical switch.
 
 ## Troubleshooting
 
